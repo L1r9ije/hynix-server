@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import sqlite3
+import sys
 import threading
 import time
 from datetime import datetime, timezone, timedelta
@@ -564,10 +565,49 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+def run_embedded_bot() -> None:
+    """Telegram-бот в отдельном потоке — чтобы всё жило в одном web-сервисе (Render free не даёт workers)."""
+    import telegram_bot
+
+    token = os.environ.get("BOT_TOKEN") or os.environ.get("HYNIX_TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("ADMIN_CHAT_ID") or os.environ.get("HYNIX_TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("[BOT] BOT_TOKEN/ADMIN_CHAT_ID не заданы — бот отключён")
+        return
+    # Бот ходит в API по localhost — внешний URL сервиса неизвестен заранее
+    if not os.environ.get("HYNIX_API_URL"):
+        os.environ["HYNIX_API_URL"] = f"http://127.0.0.1:{PORT}"
+    bot = telegram_bot.HynixTelegramBot(token, chat_id)
+    print(f"[BOT] Telegram bot started, admin chat: {chat_id}")
+    try:
+        bot.send_message(chat_id, "🤖 <b>Hynix Bot запущен</b>\n\n/api-сервер и бот работают в одном сервисе.")
+    except Exception as exc:
+        print(f"[BOT] welcome message failed: {exc}")
+    offset = 0
+    while True:
+        try:
+            updates = bot.get_updates(offset=offset, timeout=30)
+            if updates.get("ok"):
+                for update in updates.get("result", []):
+                    offset = update.get("update_id", 0) + 1
+                    if "message" in update:
+                        bot.process_message(update["message"])
+                    elif "callback_query" in update:
+                        bot.handle_callback(update["callback_query"])
+        except Exception as exc:
+            print(f"[BOT] polling error: {exc}")
+            time.sleep(5)
+        time.sleep(1)
+
+
 def main():
     init_db()
     if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
         print("[WARN] HYNIX_ADMIN_TOKEN не задан или короче 32 символов. Админ-эндпоинты не будут доступны.")
+    if (os.environ.get("BOT_TOKEN") or os.environ.get("HYNIX_TELEGRAM_BOT_TOKEN")) and \
+       (os.environ.get("ADMIN_CHAT_ID") or os.environ.get("HYNIX_TELEGRAM_CHAT_ID")):
+        sys.path.insert(0, str(ROOT))
+        threading.Thread(target=run_embedded_bot, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"Hynix API listening on {HOST}:{PORT}; database: {DB_PATH}")
     try:
