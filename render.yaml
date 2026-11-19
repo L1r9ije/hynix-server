@@ -1,0 +1,28 @@
+services:
+  - type: web
+    name: hynix-api
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server/app.py"
+    envVars:
+      - key: HYNIX_ADMIN_TOKEN
+        sync: false
+      - key: HYNIX_DATA_DIR
+        value: /opt/render/project/src/server_data
+
+  - type: worker
+    name: hynix-bot
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot_runner.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
+      - key: HYNIX_API_URL
+        value: https://hynix-api.onrender.com
+      - key: HYNIX_ADMIN_TOKEN
+        sync: false

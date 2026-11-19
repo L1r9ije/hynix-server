@@ -1,0 +1,12 @@
+[
+  {"id":"sodium","projectId":"sodium","name":"Sodium","description":"Оптимизация рендеринга и повышение FPS.","category":"Производительность","loader":"fabric","enabled":true},
+  {"id":"lithium","projectId":"lithium","name":"Lithium","description":"Оптимизация игровых систем и обработки мира.","category":"Производительность","loader":"fabric","enabled":true},
+  {"id":"ferrite-core","projectId":"ferrite-core","name":"FerriteCore","description":"Сокращает расход оперативной памяти.","category":"Производительность","loader":"fabric","enabled":true},
+  {"id":"iris","projectId":"iris","name":"Iris Shaders","description":"Загрузчик шейдеров для Fabric.","category":"Графика","loader":"fabric","enabled":true},
+  {"id":"modmenu","projectId":"modmenu","name":"Mod Menu","description":"Показывает список установленных модов и их настройки.","category":"Интерфейс","loader":"fabric","enabled":true},
+  {"id":"appleskin","projectId":"appleskin","name":"AppleSkin","description":"Отображает насыщение и восстановление голода.","category":"Интерфейс","loader":"fabric","enabled":true},
+  {"id":"xaeros-minimap","projectId":"xaeros-minimap","name":"Xaero's Minimap","description":"Компактная настраиваемая мини-карта.","category":"Исследование","loader":"fabric","enabled":true},
+  {"id":"litematica","projectId":"litematica","name":"Litematica","description":"Проекции построек по схемам.","category":"Строительство","loader":"fabric","enabled":true},
+  {"id":"entityculling","projectId":"entityculling","name":"Entity Culling","description":"Не рендерит объекты, скрытые за стенами.","category":"Производительность","loader":"fabric","enabled":true},
+  {"id":"jade","projectId":"jade","name":"Jade","description":"Показывает информацию о блоках и сущностях.","category":"Интерфейс","loader":"fabric","enabled":true}
+]

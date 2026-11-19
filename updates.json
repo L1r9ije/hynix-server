@@ -1,0 +1,46 @@
+{
+  "versions": [
+    {
+      "id": "hynix-1.16.5",
+      "name": "Hynix 1.16.5",
+      "mcVersion": "1.16.5",
+      "fabricVersion": "0.13.3",
+      "javaVersion": 21,
+      "folder": "Hynix-1.16.5",
+      "packageUrl": "https://www.dropbox.com/scl/fo/1vt6p71x5i6ek7e28djtg/ACQAjsCz14oA-CHP8lwRcDI?rlkey=4czwz3zxsv670pzz94u8nnnuq&st=96o9dovz&dl=1",
+      "packageSha1": "f414cb483d615fd551396138643e084c71810134",
+      "packageSize": 156417090,
+      "description": "Бесплатная версия для HVH серверов. Доступна всем без ключа.",
+      "status": "online",
+      "modUrl": "https://www.dropbox.com/scl/fi/snpw6w67vfdpnscturgv7/Hynix-1.0.0.jar?rlkey=bc2e0lwz9xcluxp2r8xo7yptk&st=i3e0qdd3&dl=1",
+      "requiredPlan": "free"
+    },
+    {
+      "id": "hynix-1.21.4",
+      "name": "Hynix 1.21.4",
+      "mcVersion": "1.21.4",
+      "fabricVersion": "0.16.10",
+      "javaVersion": 21,
+      "folder": "Hynix-1.21.4",
+      "description": "Актуальная версия для современных серверов. Требует Premium подписку.",
+      "status": "online",
+      "modUrl": "https://www.dropbox.com/scl/fi/du52t5jkps1u9i2l2i6b5/Hynix-1.0.0.jar?rlkey=95wyqmass2q7o9it0y1i0qqa9&st=oq1xuebo&dl=1",
+      "requiredPlan": "premium"
+    },
+    {
+      "id": "hynix-1.21.11",
+      "name": "Hynix 1.21.11",
+      "mcVersion": "1.21.11",
+      "fabricVersion": "0.19.3",
+      "javaVersion": 21,
+      "folder": "Hynix-1.21.11",
+      "description": "Актуальная версия клиента. Доступна всем без ключа.",
+      "status": "online",
+      "modUrl": "https://www.dropbox.com/scl/fi/swu5vqgptcorm93vnsohy/hynix-38.1.5-recovered.jar?rlkey=s2g2h3i0yjfqf97sj01vzb4se&st=glmo35ne&dl=1",
+      "modSha1": "94992945742bec8d41622e0218d2d6c593edc41b",
+      "modSize": 52377486,
+      "requiredMods": ["fabric-api"],
+      "requiredPlan": "free"
+    }
+  ]
+}
