@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Hynix Loader update/catalog API. Python stdlib only; SQLite persistence."""
+"""Hynix Loader update/catalog API. Persistence: PostgreSQL (Neon)."""
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import os
 import re
 import secrets
-import sqlite3
 import sys
 import threading
 import time
@@ -18,9 +16,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import psycopg
+from psycopg.rows import dict_row
+
 ROOT = Path(__file__).resolve().parents[1]
-DATA_DIR = Path(os.environ.get("HYNIX_DATA_DIR", ROOT / "server_data")).resolve()
-DB_PATH = DATA_DIR / "hynix.sqlite3"
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
 HOST = os.environ.get("HYNIX_HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", os.environ.get("HYNIX_PORT", "8787")))
 ADMIN_TOKEN = os.environ.get("HYNIX_ADMIN_TOKEN", "")
@@ -32,11 +32,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def connect() -> sqlite3.Connection:
-    con = sqlite3.connect(DB_PATH, timeout=15)
-    con.row_factory = sqlite3.Row
-    con.execute("PRAGMA foreign_keys=ON")
-    return con
+def connect() -> psycopg.Connection:
+    if not DATABASE_URL:
+        raise RuntimeError("Не задан DATABASE_URL — укажи строку подключения PostgreSQL (Neon).")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
 
 
 @contextmanager
@@ -60,23 +59,21 @@ def load_json(path: Path, fallback):
 
 
 def init_db() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     with DB_LOCK, db() as con:
-        con.executescript("""
-          CREATE TABLE IF NOT EXISTS mods (
+        con.execute("""CREATE TABLE IF NOT EXISTS mods (
             id TEXT PRIMARY KEY,
             data TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS game_versions (
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS game_versions (
             id TEXT PRIMARY KEY,
             data TEXT NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS releases (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS releases (
+            id SERIAL PRIMARY KEY,
             version TEXT NOT NULL,
             platform TEXT NOT NULL,
             arch TEXT NOT NULL,
@@ -87,8 +84,8 @@ def init_db() -> None:
             published INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
             UNIQUE(version, platform, arch)
-          );
-          CREATE TABLE IF NOT EXISTS user_stats (
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS user_stats (
             hwid_hash TEXT PRIMARY KEY,
             username TEXT NOT NULL,
             plan TEXT NOT NULL DEFAULT 'free',
@@ -99,8 +96,8 @@ def init_db() -> None:
             total_play_seconds INTEGER NOT NULL DEFAULT 0,
             first_seen TEXT NOT NULL,
             last_seen TEXT NOT NULL
-          );
-          CREATE TABLE IF NOT EXISTS license_keys (
+        )""")
+        con.execute("""CREATE TABLE IF NOT EXISTS license_keys (
             key TEXT PRIMARY KEY,
             plan TEXT NOT NULL,
             duration_days INTEGER NOT NULL,
@@ -110,29 +107,31 @@ def init_db() -> None:
             used_at TEXT,
             expires_at TEXT,
             created_at TEXT NOT NULL
-          );
-        """)
+        )""")
         # Колонки для управления пользователями (миграция старых БД)
-        user_cols = {r[1] for r in con.execute("PRAGMA table_info(user_stats)").fetchall()}
+        rows = con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name='user_stats'"
+        ).fetchall()
+        user_cols = {r["column_name"] for r in rows}
         for col, ddl in (("banned", "ALTER TABLE user_stats ADD COLUMN banned INTEGER NOT NULL DEFAULT 0"),
                          ("plan_locked", "ALTER TABLE user_stats ADD COLUMN plan_locked INTEGER NOT NULL DEFAULT 0")):
             if col not in user_cols:
                 con.execute(ddl)
-        has_mods = con.execute("SELECT COUNT(*) FROM mods").fetchone()[0]
+        has_mods = con.execute("SELECT COUNT(*) AS c FROM mods").fetchone()["c"]
         if not has_mods:
             seeds = load_json(ROOT / "catalog" / "mods.json", [])
             now = utc_now()
             for item in seeds if isinstance(seeds, list) else []:
                 if isinstance(item, dict) and item.get("id"):
-                    con.execute("INSERT OR IGNORE INTO mods VALUES (?, ?, ?, ?)",
+                    con.execute("INSERT INTO mods VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                                 (str(item["id"]), json.dumps(item, ensure_ascii=False), now, now))
-        has_versions = con.execute("SELECT COUNT(*) FROM game_versions").fetchone()[0]
+        has_versions = con.execute("SELECT COUNT(*) AS c FROM game_versions").fetchone()["c"]
         if not has_versions:
             seeds = load_json(ROOT / "updates.json", {}).get("versions", [])
             now = utc_now()
             for item in seeds if isinstance(seeds, list) else []:
                 if isinstance(item, dict) and item.get("id"):
-                    con.execute("INSERT OR IGNORE INTO game_versions VALUES (?, ?, ?, ?)",
+                    con.execute("INSERT INTO game_versions VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
                                 (str(item["id"]), json.dumps(item, ensure_ascii=False), now, now))
 
 
@@ -263,7 +262,7 @@ class Handler(BaseHTTPRequestHandler):
         now = utc_now()
         launches_delta = 1 if event == "launch" else 0
         with DB_LOCK, db() as con:
-            row = con.execute("SELECT last_seen, launches, total_play_seconds, banned, plan_locked, plan, expires_at FROM user_stats WHERE hwid_hash=?", (hwid_hash,)).fetchone()
+            row = con.execute("SELECT last_seen, launches, total_play_seconds, banned, plan_locked, plan, expires_at FROM user_stats WHERE hwid_hash=%s", (hwid_hash,)).fetchone()
             play_delta = 0
             if row and event == "heartbeat":
                 try:
@@ -282,14 +281,14 @@ class Handler(BaseHTTPRequestHandler):
                     plan, exp = "free", None
                 else:
                     plan, exp = plan, expires_at
-                con.execute("""UPDATE user_stats SET username=?, plan=?, expires_at=?, version=?,
-                               client_version=?, launches=?, total_play_seconds=?, last_seen=?
-                               WHERE hwid_hash=?""",
+                con.execute("""UPDATE user_stats SET username=%s, plan=%s, expires_at=%s, version=%s,
+                               client_version=%s, launches=%s, total_play_seconds=%s, last_seen=%s
+                               WHERE hwid_hash=%s""",
                             (username, plan, exp, version, client_version, launches, total_play, now, hwid_hash))
             else:
                 con.execute("""INSERT INTO user_stats(hwid_hash, username, plan, expires_at, version,
                                client_version, launches, total_play_seconds, first_seen, last_seen)
-                               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                             (hwid_hash, username, plan, expires_at, version, client_version,
                              launches, total_play, now, now))
         banned_flag = bool(row and row["banned"])
@@ -305,14 +304,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/catalog/mods":
                 with DB_LOCK, db() as con:
                     rows = con.execute("SELECT data FROM mods").fetchall()
-                items = [json.loads(r[0]) for r in rows]
+                items = [json.loads(r["data"]) for r in rows]
                 items = [item for item in items if item.get("enabled", True)]
                 items.sort(key=lambda item: str(item.get("name", "")).casefold())
                 return self.send_json(200, {"mods": items})
             if path == "/api/catalog/versions":
                 with DB_LOCK, db() as con:
                     rows = con.execute("SELECT data FROM game_versions ORDER BY created_at").fetchall()
-                items = [json.loads(r[0]) for r in rows]
+                items = [json.loads(r["data"]) for r in rows]
                 items = [item for item in items if item.get("status", "online") == "online" and str(item.get("modUrl", "")).startswith("https://") and "YOUR_MOD_URL_HERE" not in str(item.get("modUrl", ""))]
                 return self.send_json(200, {"versions": items})
             if path == "/api/updates/latest":
@@ -320,7 +319,7 @@ class Handler(BaseHTTPRequestHandler):
                 arch = query.get("arch", ["x64"])[0]
                 current = query.get("current", ["0.0.0"])[0]
                 with DB_LOCK, db() as con:
-                    rows = con.execute("SELECT * FROM releases WHERE platform=? AND arch=? AND published=1", (platform, arch)).fetchall()
+                    rows = con.execute("SELECT * FROM releases WHERE platform=%s AND arch=%s AND published=1", (platform, arch)).fetchall()
                 candidates = [r for r in rows if version_tuple(r["version"]) > version_tuple(current)]
                 if not candidates:
                     return self.send_json(200, {"available": False, "current": current})
@@ -334,22 +333,22 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/stats":
                 if not self.require_admin(): return
                 with DB_LOCK, db() as con:
-                    counts = {table: con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    counts = {table: con.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"]
                               for table in ("mods", "game_versions", "releases")}
-                    counts["publishedReleases"] = con.execute("SELECT COUNT(*) FROM releases WHERE published=1").fetchone()[0]
+                    counts["publishedReleases"] = con.execute("SELECT COUNT(*) AS c FROM releases WHERE published=1").fetchone()["c"]
                 return self.send_json(200, {"ok": True, **counts})
             if path == "/api/admin/mods":
                 if not self.require_admin(): return
                 with DB_LOCK, db() as con:
                     rows = con.execute("SELECT data FROM mods ORDER BY created_at DESC").fetchall()
-                return self.send_json(200, {"mods": [json.loads(r[0]) for r in rows]})
+                return self.send_json(200, {"mods": [json.loads(r["data"]) for r in rows]})
             if path == "/api/admin/versions":
                 if not self.require_admin(): return
                 with DB_LOCK, db() as con:
                     rows = con.execute("SELECT data FROM game_versions ORDER BY created_at DESC").fetchall()
                 # The public catalog is filtered, but administrators must be able
                 # to see and repair offline or draft entries too.
-                return self.send_json(200, {"versions": [json.loads(r[0]) for r in rows]})
+                return self.send_json(200, {"versions": [json.loads(r["data"]) for r in rows]})
             if path == "/api/stats/online":
                 now = datetime.now(timezone.utc)
                 online = 0
@@ -389,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError("Укажи ключ и HWID")
         now = utc_now()
         with DB_LOCK, db() as con:
-            row = con.execute("SELECT * FROM license_keys WHERE key=?", (key,)).fetchone()
+            row = con.execute("SELECT * FROM license_keys WHERE key=%s", (key,)).fetchone()
             if not row:
                 return self.send_json(404, {"ok": False, "error": "Ключ не найден"})
             if row["status"] == "banned":
@@ -399,8 +398,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(403, {"ok": False, "error": "Ключ уже активирован на другом устройстве"})
                 return self.send_json(200, {"ok": True, "key": key, "plan": row["plan"], "expiresAt": row["expires_at"]})
             expires = (datetime.now(timezone.utc) + timedelta(days=int(row["duration_days"]))).isoformat()
-            con.execute("""UPDATE license_keys SET status='used', hwid=?, username=?, used_at=?, expires_at=?
-                           WHERE key=?""",
+            con.execute("""UPDATE license_keys SET status='used', hwid=%s, username=%s, used_at=%s, expires_at=%s
+                           WHERE key=%s""",
                         (hwid, username or None, now, expires, key))
         return self.send_json(200, {"ok": True, "key": key, "plan": row["plan"], "expiresAt": expires})
 
@@ -431,13 +430,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/admin/mods":
                 item = clean_mod(data)
                 with DB_LOCK, db() as con:
-                    con.execute("INSERT INTO mods VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+                    con.execute("INSERT INTO mods VALUES (%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
                                 (item["id"], json.dumps(item, ensure_ascii=False), now, now))
                 return self.send_json(200, {"ok": True, "mod": item})
             if path == "/api/admin/versions":
                 item = clean_game_version(data)
                 with DB_LOCK, db() as con:
-                    con.execute("INSERT INTO game_versions VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+                    con.execute("INSERT INTO game_versions VALUES (%s, %s, %s, %s) ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
                                 (item["id"], json.dumps(item, ensure_ascii=False), now, now))
                 return self.send_json(200, {"ok": True, "version": item})
             if path == "/api/admin/releases":
@@ -452,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not re.fullmatch(r"[a-f0-9]{64}", sha256): raise ValueError("Нужен SHA-256 из 64 hex-символов")
                 with DB_LOCK, db() as con:
                     con.execute("""INSERT INTO releases(version,platform,arch,download_url,sha256,notes,mandatory,published,created_at)
-                                  VALUES(?,?,?,?,?,?,?,?,?)
+                                  VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                   ON CONFLICT(version,platform,arch) DO UPDATE SET
                                     download_url=excluded.download_url, sha256=excluded.sha256,
                                     notes=excluded.notes, mandatory=excluded.mandatory,
@@ -465,14 +464,14 @@ class Handler(BaseHTTPRequestHandler):
                 if not username:
                     raise ValueError("Укажи username")
                 with DB_LOCK, db() as con:
-                    cur = con.execute("UPDATE user_stats SET banned=1, plan='free', expires_at=NULL WHERE LOWER(username)=LOWER(?)", (username,))
+                    cur = con.execute("UPDATE user_stats SET banned=1, plan='free', expires_at=NULL WHERE LOWER(username)=LOWER(%s)", (username,))
                 return self.send_json(200, {"ok": True, "updated": cur.rowcount})
             if path == "/api/admin/users/unban":
                 username = str(data.get("username", "")).strip()
                 if not username:
                     raise ValueError("Укажи username")
                 with DB_LOCK, db() as con:
-                    cur = con.execute("UPDATE user_stats SET banned=0 WHERE LOWER(username)=LOWER(?)", (username,))
+                    cur = con.execute("UPDATE user_stats SET banned=0 WHERE LOWER(username)=LOWER(%s)", (username,))
                 return self.send_json(200, {"ok": True, "updated": cur.rowcount})
             if path == "/api/admin/users/setplan":
                 username = str(data.get("username", "")).strip()
@@ -482,7 +481,7 @@ class Handler(BaseHTTPRequestHandler):
                 if plan not in ("free", "premium", "beta"):
                     raise ValueError("План: free, premium или beta")
                 with DB_LOCK, db() as con:
-                    cur = con.execute("UPDATE user_stats SET plan=?, plan_locked=1 WHERE LOWER(username)=LOWER(?)", (plan, username))
+                    cur = con.execute("UPDATE user_stats SET plan=%s, plan_locked=1 WHERE LOWER(username)=LOWER(%s)", (plan, username))
                 return self.send_json(200, {"ok": True, "updated": cur.rowcount})
             if path == "/api/admin/users/extend":
                 username = str(data.get("username", "")).strip()
@@ -495,7 +494,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not 1 <= days <= 3650:
                     raise ValueError("Дни: от 1 до 3650")
                 with DB_LOCK, db() as con:
-                    rows = con.execute("SELECT hwid_hash, expires_at FROM user_stats WHERE LOWER(username)=LOWER(?)", (username,)).fetchall()
+                    rows = con.execute("SELECT hwid_hash, expires_at FROM user_stats WHERE LOWER(username)=LOWER(%s)", (username,)).fetchall()
                     updated = 0
                     for r in rows:
                         base = datetime.now(timezone.utc)
@@ -506,7 +505,7 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception:
                             current = base
                         new_exp = (current + timedelta(days=days)).isoformat()
-                        con.execute("UPDATE user_stats SET expires_at=?, plan_locked=1 WHERE hwid_hash=?", (new_exp, r["hwid_hash"]))
+                        con.execute("UPDATE user_stats SET expires_at=%s, plan_locked=1 WHERE hwid_hash=%s", (new_exp, r["hwid_hash"]))
                         updated += 1
                 return self.send_json(200, {"ok": True, "updated": updated})
             if path == "/api/admin/keys":
@@ -524,13 +523,13 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Некорректный формат ключа")
                 with DB_LOCK, db() as con:
                     con.execute("""INSERT INTO license_keys(key, plan, duration_days, status, created_at)
-                                   VALUES(?, ?, ?, 'available', ?)
+                                   VALUES(%s, %s, %s, 'available', %s)
                                    ON CONFLICT(key) DO UPDATE SET plan=excluded.plan,
                                      duration_days=excluded.duration_days, status='available'""",
                                 (key, plan, duration_days, now))
                 return self.send_json(200, {"ok": True, "key": key, "plan": plan, "durationDays": duration_days})
             return self.send_json(404, {"ok": False, "error": "Маршрут не найден"})
-        except sqlite3.IntegrityError:
+        except psycopg.errors.UniqueViolation:
             return self.send_json(409, {"ok": False, "error": "Такая версия уже опубликована для этой платформы"})
         except (ValueError, json.JSONDecodeError) as exc:
             return self.send_json(400, {"ok": False, "error": str(exc)})
@@ -544,13 +543,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with DB_LOCK, db() as con:
                 if len(parts) == 5 and parts[3] == "mods":
-                    cur = con.execute("DELETE FROM mods WHERE id=?", (parts[4],))
+                    cur = con.execute("DELETE FROM mods WHERE id=%s", (parts[4],))
                 elif len(parts) == 5 and parts[3] == "versions":
-                    cur = con.execute("DELETE FROM game_versions WHERE id=?", (parts[4],))
+                    cur = con.execute("DELETE FROM game_versions WHERE id=%s", (parts[4],))
                 elif len(parts) == 5 and parts[3] == "releases":
-                    cur = con.execute("DELETE FROM releases WHERE id=?", (parts[4],))
+                    cur = con.execute("DELETE FROM releases WHERE id=%s", (parts[4],))
                 elif len(parts) == 5 and parts[3] == "keys":
-                    cur = con.execute("UPDATE license_keys SET status='banned' WHERE key=?", (parts[4],))
+                    cur = con.execute("UPDATE license_keys SET status='banned' WHERE key=%s", (parts[4],))
                 else:
                     return self.send_json(404, {"ok": False, "error": "Маршрут не найден"})
             return self.send_json(200, {"ok": True, "deleted": cur.rowcount > 0})
@@ -601,6 +600,9 @@ def run_embedded_bot() -> None:
 
 
 def main():
+    if not DATABASE_URL:
+        print("[FATAL] Не задан DATABASE_URL. Добавь строку подключения PostgreSQL (Neon) в переменные окружения.")
+        sys.exit(1)
     init_db()
     if not ADMIN_TOKEN or len(ADMIN_TOKEN) < 32:
         print("[WARN] HYNIX_ADMIN_TOKEN не задан или короче 32 символов. Админ-эндпоинты не будут доступны.")
@@ -609,7 +611,7 @@ def main():
         sys.path.insert(0, str(ROOT))
         threading.Thread(target=run_embedded_bot, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"Hynix API listening on {HOST}:{PORT}; database: {DB_PATH}")
+    print(f"Hynix API listening on {HOST}:{PORT}; database: PostgreSQL")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

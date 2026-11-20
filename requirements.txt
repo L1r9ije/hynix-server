@@ -1,1 +1,2 @@
 requests==2.33.1
+psycopg[binary]==3.2.3
