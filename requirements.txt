@@ -1,2 +1,2 @@
 requests==2.33.1
-psycopg[binary]==3.2.3
+psycopg[binary]==3.2.13
