@@ -12,6 +12,8 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from contextlib import contextmanager
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -114,9 +116,22 @@ def init_db() -> None:
         ).fetchall()
         user_cols = {r["column_name"] for r in rows}
         for col, ddl in (("banned", "ALTER TABLE user_stats ADD COLUMN banned INTEGER NOT NULL DEFAULT 0"),
-                         ("plan_locked", "ALTER TABLE user_stats ADD COLUMN plan_locked INTEGER NOT NULL DEFAULT 0")):
+                         ("plan_locked", "ALTER TABLE user_stats ADD COLUMN plan_locked INTEGER NOT NULL DEFAULT 0"),
+                         ("uid", "ALTER TABLE user_stats ADD COLUMN uid INTEGER")):
             if col not in user_cols:
                 con.execute(ddl)
+        # Глобальный числовой ID: бэкфилл по порядку регистрации
+        max_uid = con.execute("SELECT COALESCE(MAX(uid),0) AS m FROM user_stats").fetchone()["m"]
+        nulls = con.execute("SELECT hwid_hash FROM user_stats WHERE uid IS NULL ORDER BY first_seen").fetchall()
+        for i, r in enumerate(nulls, 1):
+            con.execute("UPDATE user_stats SET uid=%s WHERE hwid_hash=%s", (max_uid + i, r["hwid_hash"]))
+        # Аккаунт владельца — всегда ID 1
+        admin_row = con.execute("SELECT hwid_hash, uid FROM user_stats WHERE LOWER(username)='l1r9ije'").fetchone()
+        if admin_row and admin_row["uid"] and admin_row["uid"] != 1:
+            other = con.execute("SELECT hwid_hash FROM user_stats WHERE uid=1").fetchone()
+            if other:
+                con.execute("UPDATE user_stats SET uid=%s WHERE hwid_hash=%s", (admin_row["uid"], other["hwid_hash"]))
+            con.execute("UPDATE user_stats SET uid=1 WHERE hwid_hash=%s", (admin_row["hwid_hash"],))
         has_mods = con.execute("SELECT COUNT(*) AS c FROM mods").fetchone()["c"]
         if not has_mods:
             seeds = load_json(ROOT / "catalog" / "mods.json", [])
@@ -210,6 +225,20 @@ def version_tuple(value: str):
     return tuple(int(x) for x in match.groups()) if match else (0, 0, 0)
 
 
+def tg_notify(text: str) -> None:
+    """Уведомление админу в Telegram (best-effort — не роняет запрос при сбое)."""
+    token = os.environ.get("BOT_TOKEN") or os.environ.get("HYNIX_TELEGRAM_BOT_TOKEN")
+    chat = os.environ.get("ADMIN_CHAT_ID") or os.environ.get("HYNIX_TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        return
+    try:
+        body = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML"}).encode("utf-8")
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=body)
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as exc:
+        print(f"[BOT] notify failed: {exc}")
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "HynixAPI/1.0"
 
@@ -261,6 +290,8 @@ class Handler(BaseHTTPRequestHandler):
             event = "heartbeat"
         now = utc_now()
         launches_delta = 1 if event == "launch" else 0
+        is_new_user = False
+        new_uid = None
         with DB_LOCK, db() as con:
             row = con.execute("SELECT last_seen, launches, total_play_seconds, banned, plan_locked, plan, expires_at FROM user_stats WHERE hwid_hash=%s", (hwid_hash,)).fetchone()
             play_delta = 0
@@ -286,13 +317,18 @@ class Handler(BaseHTTPRequestHandler):
                                WHERE hwid_hash=%s""",
                             (username, plan, exp, version, client_version, launches, total_play, now, hwid_hash))
             else:
+                next_uid = con.execute("SELECT COALESCE(MAX(uid),0)+1 AS n FROM user_stats").fetchone()["n"]
                 con.execute("""INSERT INTO user_stats(hwid_hash, username, plan, expires_at, version,
-                               client_version, launches, total_play_seconds, first_seen, last_seen)
-                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                               client_version, launches, total_play_seconds, first_seen, last_seen, uid)
+                               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                             (hwid_hash, username, plan, expires_at, version, client_version,
-                             launches, total_play, now, now))
+                             launches, total_play, now, now, next_uid))
+                is_new_user = True
+                new_uid = next_uid
         banned_flag = bool(row and row["banned"])
         self.send_json(200, {"ok": True, "banned": banned_flag})
+        if is_new_user:
+            tg_notify(f"🆕 <b>Новый пользователь!</b>\n🆔 ID: {new_uid}\n👤 {username}\n📦 План: {plan}\n🎮 Версия: {version or '—'}")
 
     def do_GET(self):
         parsed = urlparse(self.path)

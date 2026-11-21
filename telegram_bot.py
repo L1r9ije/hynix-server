@@ -192,6 +192,10 @@ class HynixTelegramBot:
             self.show_stats(chat_id)
         elif callback_data == "users":
             self.show_users(chat_id)
+        elif callback_data == "players":
+            self.show_players(chat_id)
+        elif callback_data == "online":
+            self.show_online(chat_id)
         elif callback_data == "createkey_menu":
             self.show_createkey_menu(chat_id)
         elif callback_data == "manage_menu":
@@ -248,7 +252,11 @@ class HynixTelegramBot:
             "inline_keyboard": [
                 [
                     {"text": "📊 Статистика", "callback_data": "stats"},
-                    {"text": "👥 Пользователи", "callback_data": "users"}
+                    {"text": "🎮 Игроки", "callback_data": "players"}
+                ],
+                [
+                    {"text": "🟢 Онлайн", "callback_data": "online"},
+                    {"text": "👥 База бота", "callback_data": "users"}
                 ],
                 [
                     {"text": "🔑 Создать ключ", "callback_data": "createkey_menu"}
@@ -554,13 +562,15 @@ class HynixTelegramBot:
         if not users:
             return self.send_message(chat_id, "📭 Пользователей пока нет — они появятся после входа в обновлённый лоадер.")
 
+        users = sorted(users, key=lambda u: (u.get("uid") is None, u.get("uid") or 0))
         online = sum(1 for u in users if self._is_online(u.get("last_seen")))
         message = f"👥 <b>Пользователи лоадера</b> · онлайн: <b>{online}</b>\n\n"
         for u in users[:30]:
             dot = "🟢" if self._is_online(u.get("last_seen")) else "⚫"
             plan_emoji = {"premium": "💜", "beta": "🟡"}.get(u.get("plan"), "🆓")
+            uid = f"#{u['uid']} " if u.get("uid") else ""
             message += (
-                f"{dot} <b>{u.get('username', '?')}</b> {plan_emoji}{u.get('plan', 'free')}\n"
+                f"{dot} {uid}<b>{u.get('username', '?')}</b> {plan_emoji}{u.get('plan', 'free')}\n"
                 f"   🎮 {u.get('version') or '—'} · ⏱ {self._fmt_play(u.get('total_play_seconds'))} · 🚀 {u.get('launches', 0)}\n"
                 f"   📅 подписка: {self._days_left(u.get('expires_at'))} · 🕐 {self._fmt_last_seen(u.get('last_seen'))}\n"
                 f"{'─' * 28}\n"
@@ -842,7 +852,7 @@ class HynixTelegramBot:
             locked = " 🔒" if u.get("plan_locked") else ""
             lines.append(
                 f"{online} <b>{u.get('username')}</b>{banned}{locked}\n"
-                f"   Тариф: {u.get('plan', 'free')} · Подписка: {self._days_left(u.get('expires_at'))}\n"
+                f"   🆔 ID: {u.get('uid') or '—'} · Тариф: {u.get('plan', 'free')} · Подписка: {self._days_left(u.get('expires_at'))}\n"
                 f"   Версия: {u.get('version') or '—'} · Клиент: {u.get('client_version') or '—'}\n"
                 f"   В игре: {self._fmt_play(u.get('total_play_seconds'))} · Запусков: {u.get('launches', 0)}\n"
                 f"   Был: {self._fmt_last_seen(u.get('last_seen'))}"
